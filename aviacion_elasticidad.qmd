@@ -1,0 +1,260 @@
+---
+title: "Demanda de transporte aéreo y su elasticidad ingreso"
+subtitle: "Proyecto Econometría – Parcial 2"
+author: "Jesús Leonardo Villanueva Barrón"
+date: today
+lang: es
+format:
+  html:
+    toc: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## 0. Paquetes
+
+```{r}
+paquetes <- c("lmtest", "sandwich", "car")
+for (p in paquetes) {
+  if (!requireNamespace(p, quietly = TRUE)) install.packages(p)
+}
+library(lmtest)
+library(sandwich)
+library(car)
+dir.create("resultados", showWarnings = FALSE)
+```
+
+## 1. Lectura de datos
+
+Fuente: Banco Mundial, World DataBank, base *World Development Indicators*, año 2019.
+
+
+| Código        | Variable                                             |
+|---------------|------------------------------------------------------|
+| IS.AIR.PSGR   | Pasajeros transportados por aerolíneas del país      |
+| NY.GDP.PCAP.KD| PIB per cápita (US\$ constantes de 2015)             |
+| SP.POP.TOTL   | Población total                                      |
+| ST.INT.ARVL   | Llegadas de turistas internacionales                 |
+
+```{r}
+crudo <- read.csv("datos_wdi_2019.csv", check.names = FALSE,
+                  na.strings = c("..", ""), stringsAsFactors = FALSE)
+
+
+crudo <- subset(crudo, !is.na(`Series Code`) & `Series Code` != "")
+
+
+col_anio <- grep("2019", names(crudo), value = TRUE)[1]
+crudo$valor <- as.numeric(crudo[[col_anio]])
+
+
+largo <- crudo[, c("Country Name", "Country Code", "Series Code", "valor")]
+names(largo) <- c("pais", "iso3c", "serie", "valor")
+datos <- reshape(largo, idvar = c("pais", "iso3c"), timevar = "serie",
+                 direction = "wide")
+names(datos) <- sub("^valor\\.", "", names(datos))
+names(datos)[names(datos) == "IS.AIR.PSGR"]    <- "pasajeros"
+names(datos)[names(datos) == "NY.GDP.PCAP.KD"] <- "pib_pc"
+names(datos)[names(datos) == "SP.POP.TOTL"]    <- "poblacion"
+names(datos)[names(datos) == "ST.INT.ARVL"]    <- "turistas"
+```
+
+## 2. Limpieza
+
+Se eliminan los agregados regionales (Mundo, América Latina, etc.) y los países sin datos completos.
+
+```{r}
+agregados <- c("AFE","AFW","ARB","CEB","CSS","EAP","EAR","EAS","ECA","ECS",
+               "EMU","EUU","FCS","HIC","HPC","IBD","IBT","IDA","IDB","IDX",
+               "INX","LAC","LCN","LDC","LIC","LMC","LMY","LTE","MEA","MIC",
+               "MNA","NAC","OED","OSS","PRE","PSS","PST","SAS","SSA","SSF",
+               "SST","TEA","TEC","TLA","TMN","TSA","TSS","UMC","WLD")
+datos <- subset(datos, !(iso3c %in% agregados))
+datos <- datos[, c("pais", "iso3c", "pasajeros", "pib_pc", "poblacion", "turistas")]
+datos <- na.omit(datos)
+datos <- subset(datos, pasajeros > 0 & turistas > 0)
+rownames(datos) <- NULL
+cat("Países en la muestra:", nrow(datos), "\n")
+```
+
+## 3. Estadística descriptiva
+
+```{r}
+desc <- sapply(datos[, c("pasajeros", "pib_pc", "poblacion", "turistas")],
+               function(x) c(media = mean(x), mediana = median(x),
+                             desv_est = sd(x), min = min(x), max = max(x)))
+knitr::kable(t(desc), digits = 2, format.args = list(big.mark = ","))
+write.csv(round(t(desc), 2), "resultados/descriptivos.csv")
+```
+
+## 4. Transformaciones: niveles vs. logaritmos
+
+```{r}
+datos$ln_pasajeros <- log(datos$pasajeros)
+datos$ln_pib_pc    <- log(datos$pib_pc)
+datos$ln_poblacion <- log(datos$poblacion)
+datos$ln_turistas  <- log(datos$turistas)
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4.5
+par(mfrow = c(1, 2))
+plot(datos$pib_pc, datos$pasajeros, pch = 19, col = "steelblue",
+     xlab = "PIB per cápita (US$ 2015)", ylab = "Pasajeros aéreos", main = "Niveles")
+plot(datos$ln_pib_pc, datos$ln_pasajeros, pch = 19, col = "steelblue",
+     xlab = "ln(PIB per cápita)", ylab = "ln(Pasajeros aéreos)", main = "Logaritmos")
+abline(lm(ln_pasajeros ~ ln_pib_pc, data = datos), col = "red", lwd = 2)
+```
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4.5
+par(mfrow = c(1, 2))
+hist(datos$pasajeros, breaks = 30, col = "grey80", main = "Pasajeros (niveles)", xlab = "")
+hist(datos$ln_pasajeros, breaks = 30, col = "grey80", main = "ln(Pasajeros)", xlab = "")
+```
+
+## 5. Modelos de regresión
+
+```{r}
+m_niveles <- lm(pasajeros ~ pib_pc + poblacion + turistas, data = datos)
+m_simple  <- lm(ln_pasajeros ~ ln_pib_pc, data = datos)
+m_loglog  <- lm(ln_pasajeros ~ ln_pib_pc + ln_poblacion + ln_turistas, data = datos)
+```
+
+### 5.1 Modelo en niveles
+
+```{r}
+summary(m_niveles)
+```
+
+### 5.2 Modelo log-log simple
+
+```{r}
+summary(m_simple)
+```
+
+### 5.3 Modelo log-log múltiple (modelo principal)
+
+```{r}
+summary(m_loglog)
+write.csv(round(coef(summary(m_loglog)), 4), "resultados/coeficientes_loglog.csv")
+```
+
+### 5.4 Comparación
+
+```{r}
+comparacion <- data.frame(
+  modelo   = c("Niveles", "Log-log simple", "Log-log múltiple"),
+  R2       = c(summary(m_niveles)$r.squared, summary(m_simple)$r.squared,
+               summary(m_loglog)$r.squared),
+  R2_ajust = c(summary(m_niveles)$adj.r.squared, summary(m_simple)$adj.r.squared,
+               summary(m_loglog)$adj.r.squared))
+knitr::kable(comparacion, digits = 4)
+```
+
+## 6. Pruebas de hipótesis
+
+```{r}
+gl <- df.residual(m_loglog)
+b  <- coef(m_loglog)
+se <- sqrt(diag(vcov(m_loglog)))
+
+# 6.1 ¿Volar es un "bien de lujo"?  H0: beta_ingreso <= 1  vs  H1: > 1
+t_lujo <- (b["ln_pib_pc"] - 1) / se["ln_pib_pc"]
+p_lujo <- pt(t_lujo, gl, lower.tail = FALSE)
+
+# 6.2 Elasticidad población unitaria  H0: beta_poblacion = 1
+t_pob <- (b["ln_poblacion"] - 1) / se["ln_poblacion"]
+p_pob <- 2 * pt(abs(t_pob), gl, lower.tail = FALSE)
+
+# 6.3 F conjunta  H0: beta_poblacion = beta_turistas = 0
+f_anidado <- anova(m_simple, m_loglog)
+
+pruebas <- data.frame(
+  hipotesis   = c("Elasticidad ingreso <= 1 (una cola)",
+                  "Elasticidad población = 1 (dos colas)",
+                  "Población y turistas = 0 (F conjunta)"),
+  estadistico = c(t_lujo, t_pob, f_anidado$F[2]),
+  p_valor     = c(p_lujo, p_pob, f_anidado$`Pr(>F)`[2]))
+knitr::kable(pruebas, digits = 4)
+write.csv(pruebas, "resultados/pruebas_hipotesis.csv", row.names = FALSE)
+```
+
+```{r}
+f_anidado
+linearHypothesis(m_loglog, "ln_pib_pc = 1")
+```
+
+## 7. Supuestos del modelo
+
+```{r}
+bptest(m_loglog)              # Breusch-Pagan: heterocedasticidad
+shapiro.test(resid(m_loglog)) # Shapiro-Wilk: normalidad de residuos
+vif(m_loglog)                 # Multicolinealidad
+coeftest(m_loglog, vcov = vcovHC(m_loglog, type = "HC1"))  # Errores robustos
+```
+
+```{r}
+#| fig-width: 9
+#| fig-height: 8
+par(mfrow = c(2, 2)); plot(m_loglog)
+```
+
+## 8. Intervalos de confianza de los coeficientes (95 %)
+
+```{r}
+ic_coef <- confint(m_loglog, level = 0.95)
+knitr::kable(ic_coef, digits = 4)
+write.csv(round(ic_coef, 4), "resultados/ic_coeficientes.csv")
+```
+
+## 9. Intervalos para México: promedio vs. puntual
+
+```{r}
+mex <- subset(datos, iso3c == "MEX")
+ic_media   <- predict(m_loglog, newdata = mex, interval = "confidence", level = 0.95)
+ic_puntual <- predict(m_loglog, newdata = mex, interval = "prediction", level = 0.95)
+duan <- mean(exp(resid(m_loglog)))   # corrección de Duan al regresar de logaritmos
+
+intervalos_mex <- data.frame(
+  tipo          = c("Promedio (confidence)", "Puntual (prediction)"),
+  pred_ln       = c(ic_media[1], ic_puntual[1]),
+  lim_inf_ln    = c(ic_media[2], ic_puntual[2]),
+  lim_sup_ln    = c(ic_media[3], ic_puntual[3]),
+  pred_pasaj    = exp(c(ic_media[1], ic_puntual[1])),
+  lim_inf_pasaj = exp(c(ic_media[2], ic_puntual[2])),
+  lim_sup_pasaj = exp(c(ic_media[3], ic_puntual[3])),
+  pred_duan     = exp(c(ic_media[1], ic_puntual[1])) * duan,
+  observado     = mex$pasajeros)
+knitr::kable(intervalos_mex, digits = 3, format.args = list(big.mark = ","))
+write.csv(intervalos_mex, "resultados/intervalos_mexico.csv", row.names = FALSE)
+```
+
+## 10. Elasticidades: efecto de un aumento de 10 %
+
+```{r}
+efecto10 <- (1.10^b[-1] - 1) * 100
+elas <- data.frame(variable = names(efecto10), elasticidad = b[-1],
+                   efecto_pct_si_X_sube_10 = efecto10)
+knitr::kable(elas, digits = 3, row.names = FALSE)
+write.csv(elas, "resultados/elasticidades.csv", row.names = FALSE)
+```
+
+## 11. Salida completa en texto
+
+```{r}
+salida <- capture.output({
+  cat("Países:", nrow(datos), "\n\n")
+  print(summary(m_niveles)); print(summary(m_simple)); print(summary(m_loglog))
+  print(comparacion); print(pruebas); print(f_anidado)
+  print(bptest(m_loglog)); print(shapiro.test(resid(m_loglog))); print(vif(m_loglog))
+  print(coeftest(m_loglog, vcov = vcovHC(m_loglog, type = "HC1")))
+  print(ic_coef); print(intervalos_mex); print(elas)
+})
+writeLines(salida, "resultados/salida_completa.txt")
+cat("Listo: resultados/salida_completa.txt\n")
+```
